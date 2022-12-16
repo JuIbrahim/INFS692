@@ -1,0 +1,254 @@
+---
+title: 'Model 1: Bagging'
+author: "Junaira I. Ibrahim"
+date: '2022-12-15'
+output: pdf_document
+---
+
+*Importing Packages*
+```{r, warning=FALSE}
+library(dplyr)       # for data wrangling
+library(ggplot2)     # for awesome plotting
+library(doParallel)  # for parallel backend to foreach
+library(foreach)     # for parallel processing with for loops
+library(rsample)
+library(tidyverse)
+library(bestNormalize)
+library(caret)       # for general model fitting
+library(rpart)       # for fitting decision trees
+library(ipred)       # for fitting bagged decision trees
+library(ROCR)
+library(pROC)
+library(vip)
+
+```
+
+*Importing the dataset*
+The dataset used in this model is imported from `radiomics data`. It has 197 observations and 431 variables.
+```{r}
+datard <- read.csv("D:/MS_STATISTICS/STT225 Statistical Computing/FINAL PROJECT/radiomics_completedata.csv")
+dim(datard)
+```
+
+*Checking for null and missing values*
+```{r, results='hide'}
+is.na(datard)
+colSums(is.na(datard)) # no NA thus, there is no missing values
+```
+
+*Checking for normality*
+```{r, warning=FALSE}
+md1 = datard%>%select_if(is.numeric) 
+datamd1 = lapply(md1[,-1], shapiro.test)
+r = lapply(datamd1, function(x)x$p.value) #Extracting p-value only
+s=unlist(r)    #to convert a list to vector
+sum(s[s>0.05])
+r$Entropy_cooc.W.ADC
+```
+
+Based on the results, there is only one variable who is normally distributed (i.e. Entropy_cooc.W.ADC). All the rest are not normally distributed. Hence, we will try to normalize the data using `orderNorm()` function.
+
+*Normalizing the data*
+```{r, warning=FALSE}
+datard_norm = datard[,c(3,5:length(names(datard)))]
+datard_norm = apply(datard_norm,2,orderNorm)
+datard_norm = lapply(datard_norm, function(x) x$x.t)   #to transformed original data
+datard_norm = datard_norm%>%as.data.frame()
+```
+
+Check the new data for normality
+```{r, warning=FALSE}
+datalr2 = lapply(datard_norm, shapiro.test)
+r2 = lapply(datalr2, function(x) x$p.value)
+s2 = unlist(r2)
+sum(s2>0.05)
+```
+Based on the results, the rest of the variables is now normally distributed.
+
+Substituting the normalized values into the original data, we have
+```{r, warning=FALSE}
+r3 = select(datard, c("Failure.binary",  "Entropy_cooc.W.ADC"))
+datard_m = cbind(r3,datard_norm)  #for bagging
+```
+
+In this session, we will use `datard_m`.
+
+Getting the correlation of the whole data
+```{r}
+#correlation
+newdatard = select(datard_m, -c("Failure.binary"))
+cor.newdatard = cor(newdatard)
+corr = round(cor.newdatard,2) # 2 decimals
+heatmap(corr,Rowv=NA,Colv=NA,scale="none",revC = T)
+```
+
+
+#Bagging
+**Bagging** is also known as *bootstrap aggregating * prediction models, is a general method for fitting multiple versions of a prediction model and then combining (or ensembling) them into an aggregated prediction and is designed to improve the stability and accuracy of regression and classification algorithms.
+
+```{r}
+# for reproducibility
+set.seed(123)  
+```
+
+The data `datard_m` is split into 80% of training data and 20% testing data.
+```{r}
+#80% training data - 20% testing data
+rdsplit1 <- initial_split(datard_m, prop = 0.8, strata = "Failure.binary")
+rdsplit1
+rdtrain1 <- training(rdsplit1)
+rdtest1  <- testing(rdsplit1)
+```
+
+In `bagging()` function, we use `nbagg()` to control how many iterations to include in the bagged model and `coob = TRUE` to indicate to use the Out Of Bag (oob) error rate. The oob is used to estimate the prediction error. The size of the trees can be controlled by `control` arguments, it is an options that control details of the rpart algorithm. The chunks below uses `nbagg = 100`
+```{r}
+# train bagged model
+bagging_1 <- bagging(
+  formula = Failure.binary ~ .,
+  data = rdtrain1,
+  nbagg = 100,  
+  coob = TRUE,
+  control = rpart.control(minsplit = 2, cp = 0)
+)
+
+bagging_1
+```
+Based on the results, the oob of RMSE is 0.2895 
+
+We can also apply bagging within caret and use 10-fold CV to see how good our ensemble will generalize.
+
+```{r, warning=FALSE}
+#train using caret
+bagging_2 <- train(
+  Failure.binary ~ .,
+  data = rdtrain1,
+  method = "treebag",
+  trControl = trainControl(method = "cv", number = 10),
+  nbagg = 100,  
+  control = rpart.control(minsplit = 2, cp = 0)
+)
+
+bagging_2
+```
+The result shows that the RMSE value is 0.2885 which is almost similar to the OOB estimate with 0.2895 
+
+The following chunks illustrates parallelizing the bagging algorithm (with b = 100 decision trees) on the radiomics data using eight clusters.
+
+```{r}
+# Create a parallel socket cluster
+cl <- makeCluster(8)
+
+registerDoParallel(cl) # register the parallel backend
+
+# Fit trees in parallel and compute predictions on the test set
+predictions <- foreach(
+  icount(100), 
+  .packages = "rpart", 
+  .combine = cbind
+) %dopar% {
+  # bootstrap copy of training data
+  index <- sample(nrow(rdtrain1), replace = TRUE)
+  boot <- rdtrain1[index, ]
+
+# fit tree to bootstrap copy
+  bagged_tree <- rpart(
+    Failure.binary ~ ., 
+    control = rpart.control(minsplit = 2, cp = 0),
+    data = boot
+  ) 
+  
+  predict(bagged_tree, newdata = rdtest1)
+}
+
+predictions[1:5, 1:7]
+```
+
+
+```{r}
+predictions %>%
+  as.data.frame() %>%
+  mutate(
+    observation = 1:n(),
+    actual = rdtest1$Failure.binary) %>%
+  tidyr::gather(tree, predicted, -c(observation, actual)) %>%
+  group_by(observation) %>%
+  mutate(tree = stringr::str_extract(tree, '\\d+') %>% as.numeric()) %>%
+  ungroup() %>%
+  arrange(observation, tree) %>%
+  group_by(observation) %>%
+  mutate(avg_prediction = cummean(predicted)) %>%
+  group_by(tree) %>%
+  summarize(RMSE = RMSE(avg_prediction, actual)) %>%
+  ggplot(aes(tree, RMSE)) +
+  geom_line() +
+  xlab('Number of trees')
+```
+
+
+```{r}
+# Shutdown parallel cluster
+stopCluster(cl)
+```
+
+PDPs or partial dependence plots tell us visually how each feature influences the predicted output, on average. PDPs help us to interpret any "black box" model.
+```{r}
+# Construct partial dependence plots
+p1 <- pdp::partial(
+  bagging_2, 
+  pred.var = names(datard_m)[3],
+  grid.resolution = 20
+) %>% 
+  autoplot()
+```
+
+
+```{r}
+p2 <- pdp::partial(
+  bagging_2, 
+  pred.var = names(datard_m)[4], 
+  grid.resolution = 20
+) %>% 
+  autoplot()
+```
+
+
+```{r}
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+
+```
+
+To predict using training data of `bagging_2` model, we use the `predict()` function
+```{r}
+# Use the predict function to predict using training data
+pred_train <- predict(bagging_2, rdtrain1)
+summary(pred_train)
+```
+
+To plot the training data and print the AUc values, we use the function `roc()`.
+```{r}
+# Plot the training data performance while print the AUC values
+roc(rdtrain1$Failure.binary ~ pred_train, plot=TRUE, legacy.axes=FALSE, 
+    percent=TRUE, col="blue", lwd=2, print.auc=TRUE)
+
+```
+
+To predict using testing data of ``bagging_2` model, we again use the `predict()` function.
+```{r}
+# Use the predict function to predict using testing data
+pred_test <- predict(bagging_2, rdtest1)
+summary(pred_test)
+```
+
+To plot the testing data and print the AUC values, we use the function `roc()`.
+```{r}
+# Plot the testing data performance while print the AUC values
+roc(rdtest1$Failure.binary ~ pred_test, plot=TRUE, legacy.axes=FALSE, 
+    percent=TRUE, col="blue", lwd=2, print.auc=TRUE)
+
+```
+
+we use `vip()` to construct a variable importance plot (VIP) of the top 20 features in the `bagging_2` model.
+```{r}
+vip(bagging_2, num_features = 20)
+```
+
