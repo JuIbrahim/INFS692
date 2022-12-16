@@ -1,0 +1,169 @@
+---
+title: "Model 2: Neural Network Based Model"
+author: "Junaira I. Ibrahim"
+date: "2022-12-15"
+output: pdf_document
+---
+
+
+### **Importing Packages**
+
+```{r}
+library(dplyr)         # for data manipulation
+library(keras)         # for fitting DNNs
+library(tfruns)        # for additional grid search & model training functions
+library(tensorflow)
+library(tfestimators)  # provides grid search & model training interface
+library(rsample) 
+library(tidyverse)
+library(bestNormalize)
+```
+
+### **Importing the dataset**
+The dataset used in this model is imported from `radiomics data`. It has 197 observations and 431 variables.
+```{r}
+datard <- read_csv("radiomics_completedata.csv")
+dim(datard)
+```
+
+## Data Pre-Processing
+
+### Preprocessing the data
+####*Checking for null and missing values*
+```{r, results='hide'}
+is.na(datard)
+colSums(is.na(datard))
+```
+
+```{r}
+anyNA(datard)
+```
+Based on the results, there is no missing values.
+
+####*Checking for normality*
+```{r,warning=F}
+dp1 = datard%>%select_if(is.numeric) 
+datadl1 = lapply(dp1[,-1], shapiro.test)
+r = lapply(datadl1, function(x)x$p.value) #Extracting p-value only
+s=unlist(r)    #to convert a list to vector
+sum(s[s>0.05])
+r$Entropy_cooc.W.ADC
+```
+Based on the results, there is only one variable who is normally distributed (i.e. Entropy_cooc.W.ADC). All the rest are not normally distributed. Hence, we will try to normalize the data using `orderNorm()` function.
+
+####*Normalizing the data*
+```{r,warning=FALSE}
+datard_norm = datard[,c(3,5:length(names(datard)))]
+datard_norm = apply(datard_norm,2,orderNorm)
+datard_norm = lapply(datard_norm, function(x) x$x.t)   #to transformed original data
+datard_norm = datard_norm%>%as.data.frame()
+```
+
+Test again using shapiro-wilk's test.
+
+```{r,warning=F}
+datadl2 = lapply(datard_norm, shapiro.test)
+r2 = lapply(datadl2, function(x) x$p.value)
+s2 = unlist(r2)
+sum(s2>0.05)
+```
+Based on the results, the rest of the variables is now normally distributed.
+
+Substituing the normalized values into the original data, we have
+```{r,warning=F}
+r3 = select(datard, c("Failure.binary",  "Entropy_cooc.W.ADC"))
+datard_n = cbind(r3,datard_norm)
+```
+
+## Splitting
+
+Split the data into training (80%) and testing (30%). 
+
+```{r}
+datard_n<-datard_n %>%
+  mutate(Failure.binary=ifelse(Failure.binary== "No",0,1))
+
+set.seed(123)
+rdsplit = initial_split(datard_n, prop = 0.8, strata = "Failure.binary")
+rdtrain <- training(rdsplit)
+rdtest  <- testing(rdsplit)
+
+train1 <- rdtrain[,-c(1,2)]%>%as.matrix.data.frame()
+train2 <- rdtrain$Failure.binary
+test1 <- rdtest[,-c(1,2)]%>%as.matrix.data.frame()
+test2 <- rdtest$Failure.binary
+```
+
+## Reshaping the dataset
+```{r, warning=FALSE}
+train1 <- array_reshape(train1, c(nrow(train1), ncol(train1)))
+train1 <- train1 
+
+test1 <- array_reshape(test1, c(nrow(test1), ncol(test1)))
+test1 <- test1 
+
+train2 <- to_categorical(train2, num_classes = 2)
+test2 <- to_categorical(test2, num_classes = 2)
+```
+
+## Run the model
+
+```{r, warning=FALSE}
+modeldl <- keras_model_sequential() %>%
+  
+   # Network architecture
+  layer_dense(units = 256, activation = "sigmoid", input_shape = c(ncol(train1))) %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_dense(units = 128, activation = "sigmoid") %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_dense(units = 128, activation = "sigmoid") %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_dense(units = 64, activation = "sigmoid") %>% 
+  layer_dropout(rate = 0.25) %>%
+  layer_dense(units = 64, activation = "sigmoid") %>% 
+  layer_dropout(rate = 0.25) %>%
+  layer_dense(units = 2, activation = "softmax") %>% 
+
+# Backpropagation
+ compile(
+    loss = "categorical_crossentropy",
+    optimizer = optimizer_rmsprop(),
+    metrics = c("accuracy")
+  )
+modeldl
+```
+
+## Trained the model
+
+```{r}
+#trained model history
+fitdl <- modeldl %>% 
+  fit(train1, train2, 
+      epochs = 10, 
+      batch_size = 128, 
+      validation_split = 0.15)
+
+# Display output
+fitdl
+
+#plot the training and validation performance over 10 epochs
+plot(fitdl)
+```
+
+
+## Evaluate the trained model  using testing dataset 
+
+
+```{r}
+modeldl %>%
+  evaluate(test1, test2)
+dim(test1)
+dim(test2)
+```
+
+## Model prediction using testing dataset
+
+```{r}
+modeldl %>% 
+  predict(test1) %>% `>`(0.5) %>% k_cast("int32")
+```
