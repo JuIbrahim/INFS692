@@ -1,5 +1,5 @@
 # Objective
-The objective of this project is to develop different models to predict failure of the radiomics data.
+The objective of this project is to develop different models to predict Failure.binary of the radiomics data.
 
 # Data
 The data used in this session is radiomics_completedata.csv. It has 197 observations and 498 variables. Failure.binary is the binary property to predict. The data is normalized before using in the model. The data is splitted into training set (80%) and testing set(20%).
