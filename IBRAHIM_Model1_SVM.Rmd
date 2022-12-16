@@ -1,0 +1,229 @@
+---
+title: 'Model 1: SVM'
+author: "Junaira I. Ibrahim"
+date: '2022-12-16'
+output: pdf_document
+---
+
+*Importing Packages*
+```{r}
+# Helper packages
+library(dplyr)    # for data wrangling
+library(ggplot2)  # for awesome graphics
+library(rsample)  # for data splitting
+library(caret)    # for classification and regression training
+library(kernlab)  # for fitting SVMs
+library(modeldata) #for Failure.binary data
+library(forcats)
+library(bestNormalize)
+library(pdp)      # for partial dependence plots, etc.
+library(vip)      # for variable importance plots
+```
+
+
+#### **Importing the dataset**
+The dataset used in this model is imported from `radiomics data`. It has 197 observations and 431 variables.
+```{r}
+datard <- read.csv("D:/MS_STATISTICS/STT225 Statistical Computing/FINAL PROJECT/radiomics_completedata.csv")
+dim(datard)
+```
+
+####*Checking for null and missing values*
+```{r, results='hide'}
+is.na(datard)
+colSums(is.na(datard)) # no NA thus, there is no missing values
+```
+
+####*Checking for normality*
+```{r, warning=FALSE}
+md1 = datard%>%select_if(is.numeric) 
+datamd1 = lapply(md1[,-1], shapiro.test)
+r = lapply(datamd1, function(x)x$p.value) #Extracting p-value only
+s=unlist(r)    #to convert a list to vector
+sum(s[s>0.05])
+r$Entropy_cooc.W.ADC
+```
+
+Based on the results, there is only one variable who is normally distributed (i.e. Entropy_cooc.W.ADC). All the rest are not normally distributed. Hence, we will try to normalize the data using `orderNorm()` function.
+
+####*Normalizing the data*
+```{r, warning=FALSE}
+datard_norm = datard[,c(3,5:length(names(datard)))]
+datard_norm = apply(datard_norm,2,orderNorm)
+datard_norm = lapply(datard_norm, function(x) x$x.t)   #to transformed original data
+datard_norm = datard_norm%>%as.data.frame()
+```
+
+Check the new data for normality
+```{r, warning=FALSE}
+datalr2 = lapply(datard_norm, shapiro.test)
+r2 = lapply(datalr2, function(x) x$p.value)
+s2 = unlist(r2)
+sum(s2>0.05)
+```
+Based on the results, the rest of the variables is now normally distributed.
+
+Substituting the normalized values into the original data, we have
+```{r, warning=FALSE}
+r3 = select(datard, c("Failure.binary",  "Entropy_cooc.W.ADC"))
+datard_n = cbind(r3,datard_norm)
+```
+
+To set the `Failure.binary` into a factor level in dataset `datard_n`, we use the function `as.factor()` function.
+```{r}
+datard_n$Failure.binary=as.factor(datard_n$Failure.binary)
+```
+
+In this session, we will use `datard_n`.
+
+Getting the correlation of the whole data
+```{r}
+#correlation
+newdatard = select(datard_n, -c("Failure.binary"))
+cor.newdatard = cor(newdatard)
+corr = round(cor.newdatard,2) # 2 decimals
+heatmap(corr,Rowv=NA,Colv=NA,scale="none",revC = T)
+```
+
+#Support Vector Machine
+Support vector machines (SVMs) offer a direct approach to binary classification.
+
+SVMs use the kernel trick to enlarge the feature space using basis functions. A **Kernel Trick** is a simple method where a Non Linear data is projected onto a higher dimension space so as to make it easier to classify the data where it could be linearly divided by a plane. The popular kernel function used by SVMs are Linear `"svmLinear"`, Polynomial Kernel `"svmPoly"` and Radial basis kernel `"svmRadial"`.
+
+In the following chunks, we use `getModelInfo()` function to extract the hyperparameters from various SVM implementations with different kernel functions.
+```{r}
+# Linear (i.e., soft margin classifier)
+caret::getModelInfo("svmLinear")$svmLinear$parameters
+
+# Polynomial kernel
+caret::getModelInfo("svmPoly")$svmPoly$parameters
+
+# Radial basis kernel
+caret::getModelInfo("svmRadial")$svmRadial$parameters
+```
+
+
+We can tune an SVM model with `train()`function with radial basis kernel using the data `rdtrain` and 10-fold CV.
+
+The data `datard_n` is split into 80% of training data and 20% testing data.
+```{r}
+#80% training data - 20% testing data
+rdsplit <- initial_split(datard_n, prop = 0.8, strata = "Failure.binary")
+rdsplit
+rdtrain <- training(rdsplit)
+rdtest  <- testing(rdsplit)
+```
+
+```{r}
+set.seed(1854)  # for reproducibility
+split_svm <- train(
+  Failure.binary ~ ., 
+  data = rdtrain,
+  method = "svmRadial",               
+  preProcess = c("center", "scale"),  
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 10
+)
+```
+
+Plotting the results, we see that smaller values of the cost parameter (C = 16-64) provide better cross-validated accuracy scores for these training data.
+
+```{r}
+# Plot results
+ggplot(split_svm) + theme_light()
+
+# Print results
+split_svm$results
+```
+
+Control parameter
+
+In order to obtain predicted class probabilities from an SVM, additional parameters need to be estimated. The predicted class probabilities are often more useful than the predicted class labels. For instance, we would need the predicted class probabilities if we were using an optimization metric like AUC. In that case, we can set `classProbs = TRUE` in the call to `trainControl()`.
+```{r}
+class.weights = c("No" = 1, "Yes" = 10)
+
+# Control params for SVM
+ctrl <- trainControl(
+  method = "cv", 
+  number = 10, 
+  classProbs = TRUE,                 
+  summaryFunction = twoClassSummary
+)
+
+rdtrain$Failure.binary = fct_recode(rdtrain$Failure.binary,No="0",Yes="1")
+
+```
+
+Print the AUC values during Training
+```{r}
+# Tune an SVM
+set.seed(5628)  # for reproducibility
+train_svm_auc <- train(
+  Failure.binary ~ ., 
+  data = rdtrain,
+  method = "svmRadial",               
+  preProcess = c("center", "scale"),  
+  metric = "ROC",       
+  trControl = ctrl,
+  tuneLength = 10
+)
+
+# Print results
+train_svm_auc$results
+confusionMatrix(train_svm_auc)
+```
+Based on the result, it is clear that we do a far better job at predicting the `No`s.
+
+Print the AUC values during Testing
+```{r}
+rdtest$Failure.binary = fct_recode(rdtest$Failure.binary,No="0",Yes="1")
+
+# Tune an SVM with radial 
+set.seed(5628)  # for reproducibility
+test_svm_auc <- train(
+  Failure.binary ~ ., 
+  data = rdtest,
+  method = "svmRadial",               
+  preProcess = c("center", "scale"),  
+  metric = "ROC",  # area under ROC curve (AUC)       
+  trControl = ctrl,
+  tuneLength = 10
+)
+```
+
+```{r}
+# Print results
+test_svm_auc$results
+confusionMatrix(test_svm_auc)
+```
+Similar to training set, it is clear that we do a far better job at predicting the `No`s.
+
+To compute the vip scores we just call `vip()` with `method = "permute"` and pass our previously defined predictions wrapper to the `pred_wrapper` argument.
+```{r}
+prob1 <- function(object, newdata) {
+  predict(object, newdata = newdata, type = "prob")[, "Yes"]
+}
+```
+
+
+```{r}
+# Variable importance plot
+set.seed(2827)  # for reproducibility
+vip(train_svm_auc, method = "permute", nsim = 5, train = rdtrain, num_features = 20, target = "Failure.binary", metric = "auc", reference_class = "Yes", 
+    pred_wrapper = prob1)
+```
+The results indicate that *Failure* and *Entropy_cooc.W.ADC* is the most important feature in predicting `Failure.binary`.
+
+
+Next, we use the pdp package to construct PDPs for the top four features according to the permutation-based variable importance scores.
+```{r}
+features1 <- c("Failure", "Entropy_cooc.W.ADC", 
+              "RLVAR_align.H.ADC", "Compactness_v1.PET")
+pdps <- lapply(features1, function(x) {
+  partial(train_svm_auc, pred.var = x, which.class = 2,  
+          prob = TRUE, plot = TRUE, plot.engine = "ggplot2") +
+    coord_flip()
+})
+
+grid.arrange(grobs = pdps,  ncol = 2)
+```
